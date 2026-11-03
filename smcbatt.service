@@ -1,0 +1,18 @@
+[Unit]
+Description=Load smcbatt (macsmc battery power/energy fixups)
+Documentation=https://github.com/eahmed234/smcbatt
+# Only machines where macsmc-power actually registered a battery. Kernels
+# older than 7.3 boot applesmc + ACPI SBS and have no macsmc-battery at all,
+# so the unit is skipped there instead of failing.
+ConditionPathExists=/sys/class/power_supply/macsmc-battery
+After=systemd-modules-load.service
+# Let the corrected properties be in place for upower's first refresh.
+Before=upower.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/modprobe -q smcbatt
+
+[Install]
+WantedBy=multi-user.target

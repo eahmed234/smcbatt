@@ -1,0 +1,14 @@
+# kernel module build output
+*.o
+*.ko
+*.mod
+*.mod.c
+.*.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+
+# makepkg working dirs, source clones and packages
+packaging/aur/*/src/
+packaging/aur/*/pkg/
+packaging/aur/*/*.pkg.tar.*

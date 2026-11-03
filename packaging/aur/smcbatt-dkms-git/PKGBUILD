@@ -1,0 +1,54 @@
+# Maintainer: Eisa Ahmed <eahmed234@gmail.com>
+#
+# smcbatt - fixes power_now and energy reporting for macsmc-battery/macsmc-ac
+# on Intel Macs that Linux 7.3 moved from applesmc to the macsmc stack.
+
+pkgname=smcbatt-dkms-git
+pkgver=0
+pkgrel=1
+pkgdesc="DKMS module fixing power_now and energy reporting for the macsmc battery driver"
+arch=('x86_64')
+url="https://github.com/eahmed234/smcbatt"
+license=('GPL-2.0-only')
+depends=('dkms')
+makedepends=('git')
+provides=('smcbatt')
+conflicts=('smcbatt-dkms')
+install="$pkgname.install"
+
+_srcname=smcbatt
+source=("$_srcname::git+$url.git#branch=main")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$_srcname"
+  # No tags: commit count plus hash, same scheme as the other macsmc packages.
+  printf 'r%s.%s' \
+    "$(git rev-list --count HEAD)" \
+    "$(git rev-parse --short=7 HEAD)"
+}
+
+package() {
+  cd "$_srcname"
+  local _dst="$pkgdir/usr/src/smcbatt-$pkgver"
+
+  install -d "$_dst"
+  install -m644 smcbatt.c Makefile "$_dst/"
+
+  cat > "$_dst/dkms.conf" <<'EOF'
+PACKAGE_NAME="smcbatt"
+PACKAGE_VERSION="@PKGVER@"
+MAKE[0]="make KVER=${kernelver} KBUILD_DIR=${kernel_source_dir}"
+BUILT_MODULE_NAME[0]="smcbatt"
+BUILT_MODULE_LOCATION[0]="."
+DEST_MODULE_LOCATION[0]="/updates/dkms"
+AUTOINSTALL="yes"
+# macsmc only exists from 7.3 on; older kernels still boot applesmc and SBS.
+BUILD_EXCLUSIVE_KERNEL_MIN="7.3"
+EOF
+  sed -i "s/@PKGVER@/$pkgver/" "$_dst/dkms.conf"
+
+  install -Dm644 smcbatt.service \
+    "$pkgdir/usr/lib/systemd/system/smcbatt.service"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

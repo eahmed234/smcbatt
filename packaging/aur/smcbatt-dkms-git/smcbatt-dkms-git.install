@@ -1,0 +1,28 @@
+post_install() {
+  cat <<'EOF'
+smcbatt is built by DKMS for every installed kernel 7.3 and newer. Older
+kernels still ship applesmc and ACPI SBS, so DKMS skips them on purpose.
+
+The unit is enabled but not started here: the DKMS hook may not have built the
+module yet. Start it once, or reboot:
+  sudo systemctl start smcbatt.service
+
+Check it:
+  lsmod | grep smcbatt
+  upower -i /org/freedesktop/UPower/devices/battery_macsmc_battery
+EOF
+
+  if [ -d /run/systemd/system ]; then
+    systemctl enable smcbatt.service >/dev/null 2>&1 || true
+  fi
+}
+
+post_upgrade() {
+  post_install
+}
+
+pre_remove() {
+  if [ -d /run/systemd/system ]; then
+    systemctl disable --now smcbatt.service >/dev/null 2>&1 || true
+  fi
+}
