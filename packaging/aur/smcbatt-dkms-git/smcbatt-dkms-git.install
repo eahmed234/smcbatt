@@ -7,13 +7,22 @@ The unit is enabled but not started here: the DKMS hook may not have built the
 module yet. Start it once, or reboot:
   sudo systemctl start smcbatt.service
 
+The charge limit ships as 80% in /etc/battlimit.conf and is applied at boot by
+battlimit.service (also enabled here). Change it with:
+
+  sudo battlimit set 80     # apply and remember
+  sudo battlimit off        # back to 100%
+  battlimit                 # show current and configured
+
 Check it:
   lsmod | grep smcbatt
   upower -i /org/freedesktop/UPower/devices/battery_macsmc_battery
+  cat /sys/class/power_supply/macsmc-battery/charge_control_end_threshold
 EOF
 
   if [ -d /run/systemd/system ]; then
-    systemctl enable smcbatt.service >/dev/null 2>&1 || true
+    systemctl enable smcbatt.service battlimit.service >/dev/null 2>&1 || true
+    systemctl start battlimit.service >/dev/null 2>&1 || true
   fi
 }
 
@@ -23,6 +32,10 @@ post_upgrade() {
 
 pre_remove() {
   if [ -d /run/systemd/system ]; then
-    systemctl disable --now smcbatt.service >/dev/null 2>&1 || true
+    systemctl disable --now smcbatt.service battlimit.service >/dev/null 2>&1 || true
+  fi
+  # Leaving the SMC limited after the package is gone would be a nasty surprise.
+  if [ -e /sys/class/power_supply/macsmc-battery/charge_control_end_threshold ]; then
+    printf '100\n' > /sys/class/power_supply/macsmc-battery/charge_control_end_threshold 2>/dev/null || true
   fi
 }

@@ -1,0 +1,14 @@
+[Unit]
+Description=Apply the battery charge limit (macsmc-battery)
+Documentation=https://github.com/eahmed234/smcbatt
+# Machines and kernels whose battery has no charge limit, e.g. applesmc + SBS.
+ConditionPathExists=/sys/class/power_supply/macsmc-battery/charge_control_end_threshold
+After=smcbatt.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/battlimit apply
+
+[Install]
+WantedBy=multi-user.target

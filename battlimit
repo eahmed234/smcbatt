@@ -1,0 +1,154 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# battlimit - persisted charge limit for the macsmc battery.
+#
+# macsmc-power already exposes the limit as charge_control_end_threshold, and
+# the SMC key behind it (CHWA) is the one macOS writes. Nothing has to be
+# patched or rebuilt; what is missing is a remembered value and something that
+# applies it after every boot.
+#
+#   battlimit              show the limit in use and the configured one
+#   battlimit get          print the limit the battery is using now
+#   battlimit set 80       apply 80% and remember it for the next boot (root)
+#   battlimit off          stop limiting the charge, i.e. 100% (root)
+#   battlimit apply        apply the remembered value (root, used at boot)
+
+set -u
+
+CONF=${BATTLIMIT_CONF:-/etc/battlimit.conf}
+SYSFS=${BATTLIMIT_SYSFS:-/sys/class/power_supply}
+SERVICE_CONF=80
+
+die() { printf 'battlimit: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+	cat <<'EOF'
+usage: battlimit                show the current and configured limit
+       battlimit get            print the limit in use
+       battlimit set <0-100>    apply and remember a limit (root)
+       battlimit off            remove the limit (100%) and remember that
+       battlimit apply          apply the remembered limit (root, at boot)
+EOF
+}
+
+# 100 means no limit; 0 stops charging immediately.
+is_pct() {
+	case ${1:-} in
+	''|*[!0-9]*) return 1 ;;
+	esac
+	[ "$1" -ge 0 ] && [ "$1" -le 100 ]
+}
+
+threshold_attr() {
+	for f in "$SYSFS"/*/charge_control_end_threshold; do
+		[ -e "$f" ] || continue
+		printf '%s\n' "$f"
+		return 0
+	done
+	return 1
+}
+
+current() {
+	attr=$(threshold_attr) ||
+		die "no charge_control_end_threshold under $SYSFS (is macsmc-power loaded?)"
+	cat "$attr"
+}
+
+configured() {
+	if [ -r "$CONF" ]; then
+		value=$(sed -n 's/^[[:space:]]*THRESHOLD[[:space:]]*=[[:space:]]*//p' "$CONF" |
+			tail -n 1 | tr -d '[:space:]"')
+		if [ -n "$value" ]; then
+			printf '%s\n' "$value"
+			return 0
+		fi
+	fi
+	printf '%s\n' "$SERVICE_CONF"
+}
+
+# Write and read back: a limit the SMC silently ignored is worse than an error.
+write_threshold() {
+	attr=$(threshold_attr) ||
+		die "no charge_control_end_threshold under $SYSFS (is macsmc-power loaded?)"
+
+	if [ ! -w "$attr" ]; then
+		die "cannot write $attr (run with sudo)"
+	fi
+
+	printf '%s\n' "$1" >"$attr" || die "writing $1 to $attr failed"
+
+	readback=$(cat "$attr")
+	if [ "$readback" != "$1" ]; then
+		die "$attr reads back '$readback' after writing $1"
+	fi
+}
+
+save() {
+	if [ "$(id -u)" -ne 0 ]; then
+		die "remembering the limit needs root: sudo battlimit set $1"
+	fi
+
+	dir=$(dirname "$CONF")
+	[ -d "$dir" ] || mkdir -p "$dir" || die "cannot create $dir"
+
+	tmp=$(mktemp "$dir/.battlimit.XXXXXX") || die "cannot create a file in $dir"
+	cat >"$tmp" <<EOF
+# Charge limit for the macsmc battery, applied at boot by battlimit.service.
+# 100 means no limit. Change it with: sudo battlimit set <percent>
+THRESHOLD=$1
+EOF
+	chmod 644 "$tmp"
+	mv "$tmp" "$CONF" || die "cannot write $CONF"
+}
+
+cmd=${1:-status}
+
+case $cmd in
+-h | --help | help)
+	usage
+	;;
+status)
+	if attr=$(threshold_attr); then
+		printf 'current:    %s%%\n' "$(cat "$attr")"
+	else
+		printf 'current:    unknown (no charge_control_end_threshold under %s)\n' "$SYSFS"
+	fi
+	printf 'configured: %s%%\n' "$(configured)"
+	;;
+get)
+	current
+	;;
+set)
+	[ $# -ge 2 ] || die "usage: battlimit set <0-100>"
+	is_pct "$2" || die "'$2' is not a percentage from 0 to 100"
+	# Checked before the write: a limit applied but not remembered would be
+	# lost at the next boot, which is a worse outcome than refusing.
+	[ "$(id -u)" -eq 0 ] || die "setting the limit needs root: sudo battlimit set $2"
+	write_threshold "$2"
+	save "$2"
+	printf 'limit set to %s%% and remembered in %s\n' "$2" "$CONF"
+	;;
+off)
+	[ "$(id -u)" -eq 0 ] || die "setting the limit needs root: sudo battlimit off"
+	write_threshold 100
+	save 100
+	printf 'limit removed (100%%) and remembered in %s\n' "$CONF"
+	;;
+apply)
+	want=$(configured)
+	is_pct "$want" || die "THRESHOLD in $CONF is not a percentage: '$want'"
+
+	if attr=$(threshold_attr) && [ "$(cat "$attr")" = "$want" ]; then
+		printf 'battlimit: already at %s%%\n' "$want"
+		exit 0
+	fi
+
+	write_threshold "$want"
+	printf 'battlimit: charge limit %s%% applied\n' "$want"
+	;;
+*)
+	usage >&2
+	exit 2
+	;;
+esac

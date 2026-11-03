@@ -82,6 +82,32 @@ journalctl -b -k | grep -c 'power_now'      # 0 after the module loads
 Without the module: ~100 W, ~45 min at 83 %, and `power_now` errors in the log.
 With it: ~15–20 W idle, hours of runtime, no errors.
 
+## Charge limit
+
+`macsmc-power` already exposes the limit macOS writes as
+`/sys/class/power_supply/macsmc-battery/charge_control_end_threshold` (SMC key
+`CHWA`), but it is root-only and nothing re-applies it after a boot. `battlimit`
+adds the missing parts: the value lives in `/etc/battlimit.conf`, and
+`battlimit.service` applies it at boot.
+
+```sh
+sudo battlimit set 80     # apply 80% now and remember it
+battlimit                 # current: 80%  configured: 80%
+sudo battlimit off        # stop limiting (100%)
+```
+
+`battlimit get` prints the limit in use and `battlimit apply` is what the unit
+runs. Every write is read back, so a limit the SMC ignored is reported as an
+error instead of being silently believed. `battlimit.service` carries
+`ConditionPathExists` on the attribute, so a kernel that still boots `applesmc`
+with ACPI SBS simply skips it.
+
+A desktop shell may offer its own toggle for the same attribute (Noctalia has
+one). That changes the limit at runtime only; `battlimit.service` re-applies
+`/etc/battlimit.conf` at the next boot. For a change that should survive a
+reboot, use `sudo battlimit set <percent>`, which updates the file and the
+battery together.
+
 ## Limitations
 
 `energy-full-design` and battery health stay unknown: `macsmc-power` never

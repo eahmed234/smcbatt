@@ -6,7 +6,7 @@
 pkgname=smcbatt-dkms-git
 pkgver=0
 pkgrel=1
-pkgdesc="DKMS module fixing power_now and energy reporting for the macsmc battery driver"
+pkgdesc="DKMS module fixing power_now and energy reporting for the macsmc battery driver, with a persisted charge limit"
 arch=('x86_64')
 url="https://github.com/eahmed234/smcbatt"
 license=('GPL-2.0-only')
@@ -15,6 +15,7 @@ makedepends=('git')
 provides=('smcbatt')
 conflicts=('smcbatt-dkms')
 install="$pkgname.install"
+backup=('etc/battlimit.conf')
 
 _srcname=smcbatt
 source=("$_srcname::git+$url.git#branch=main")
@@ -50,5 +51,13 @@ EOF
 
   install -Dm644 smcbatt.service \
     "$pkgdir/usr/lib/systemd/system/smcbatt.service"
+
+  # Charge limit: the driver already exposes the attribute, these apply a
+  # remembered value to it at boot and give it a command line.
+  install -Dm755 battlimit "$pkgdir/usr/bin/battlimit"
+  install -Dm644 battlimit.service \
+    "$pkgdir/usr/lib/systemd/system/battlimit.service"
+  install -Dm644 battlimit.conf "$pkgdir/etc/battlimit.conf"
+
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }
