@@ -7,12 +7,19 @@ The unit is enabled but not started here: the DKMS hook may not have built the
 module yet. Start it once, or reboot:
   sudo systemctl start smcbatt.service
 
-The charge limit ships as 80% in /etc/battlimit.conf and is applied at boot by
-battlimit.service (also enabled here). Change it with:
+The charge limit needs nothing from this package: macsmc-power exposes
+charge_control_end_threshold and UPower drives it, so a shell's charge-limit
+toggle (Noctalia has one, 80% on/off) works on its own. battlimit is for what
+that path cannot do - a value other than 80/100, and applying it at boot:
 
-  sudo battlimit set 80     # apply and remember
-  sudo battlimit off        # back to 100%
-  battlimit                 # show current and configured
+  battlimit                       # current and configured
+  sudo battlimit set 75           # apply and remember in /etc/battlimit.conf
+  sudo battlimit off              # back to 100%
+  sudo systemctl enable --now battlimit.service   # optional, see below
+
+battlimit.service is installed DISABLED on purpose: enabling it would rewrite
+the limit from /etc/battlimit.conf at every boot and undo a toggle you set in
+the shell. Enable it only if you want that file to be the authority.
 
 Check it:
   lsmod | grep smcbatt
@@ -21,8 +28,7 @@ Check it:
 EOF
 
   if [ -d /run/systemd/system ]; then
-    systemctl enable smcbatt.service battlimit.service >/dev/null 2>&1 || true
-    systemctl start battlimit.service >/dev/null 2>&1 || true
+    systemctl enable smcbatt.service >/dev/null 2>&1 || true
   fi
 }
 
@@ -34,8 +40,11 @@ pre_remove() {
   if [ -d /run/systemd/system ]; then
     systemctl disable --now smcbatt.service battlimit.service >/dev/null 2>&1 || true
   fi
-  # Leaving the SMC limited after the package is gone would be a nasty surprise.
-  if [ -e /sys/class/power_supply/macsmc-battery/charge_control_end_threshold ]; then
-    printf '100\n' > /sys/class/power_supply/macsmc-battery/charge_control_end_threshold 2>/dev/null || true
+  # Reset the SMC only if this package was the one enforcing the limit: a limit
+  # set from a desktop toggle is the user's choice and must survive removal.
+  if systemctl is-enabled --quiet battlimit.service 2>/dev/null; then
+    if [ -e /sys/class/power_supply/macsmc-battery/charge_control_end_threshold ]; then
+      printf '100\n' > /sys/class/power_supply/macsmc-battery/charge_control_end_threshold 2>/dev/null || true
+    fi
   fi
 }

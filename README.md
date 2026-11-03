@@ -86,14 +86,20 @@ With it: ~15–20 W idle, hours of runtime, no errors.
 
 `macsmc-power` already exposes the limit macOS writes as
 `/sys/class/power_supply/macsmc-battery/charge_control_end_threshold` (SMC key
-`CHWA`), but it is root-only and nothing re-applies it after a boot. `battlimit`
-adds the missing parts: the value lives in `/etc/battlimit.conf`, and
-`battlimit.service` applies it at boot.
+`CHWA`), and UPower drives it through `EnableChargeThreshold`. A shell with a
+charge-limit toggle therefore works without this project: Noctalia's toggle
+writes 80% when on and 100% when off, straight through UPower.
+
+`battlimit` covers what that path cannot: a value other than 80/100, and
+re-applying a remembered value at boot. It ships with `/etc/battlimit.conf` and
+`battlimit.service`, and the unit is installed **disabled** so it never rewrites
+the limit behind a toggle you already use.
 
 ```sh
-sudo battlimit set 80     # apply 80% now and remember it
 battlimit                 # current: 80%  configured: 80%
-sudo battlimit off        # stop limiting (100%)
+sudo battlimit set 75     # apply 75% and remember it (root)
+sudo battlimit off        # back to 100%
+sudo systemctl enable --now battlimit.service   # make the file authoritative
 ```
 
 `battlimit get` prints the limit in use and `battlimit apply` is what the unit
@@ -102,11 +108,14 @@ error instead of being silently believed. `battlimit.service` carries
 `ConditionPathExists` on the attribute, so a kernel that still boots `applesmc`
 with ACPI SBS simply skips it.
 
-A desktop shell may offer its own toggle for the same attribute (Noctalia has
-one). That changes the limit at runtime only; `battlimit.service` re-applies
-`/etc/battlimit.conf` at the next boot. For a change that should survive a
-reboot, use `sudo battlimit set <percent>`, which updates the file and the
-battery together.
+Two owners, so pick one:
+
+* **Shell toggle** (default): leave `battlimit.service` disabled. Toggling on
+  writes 80, off writes 100; the file is only a note.
+* **`battlimit`**: `sudo systemctl enable --now battlimit.service`. The limit is
+  then whatever `/etc/battlimit.conf` says at every boot, and a shell toggle only
+  holds until the next one. Note that a config of 100 is active too: it resets a
+  toggle-on back to 100 at boot.
 
 ## Limitations
 
