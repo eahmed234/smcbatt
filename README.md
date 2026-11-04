@@ -26,7 +26,7 @@ properties itself, delegating everything else to the original:
 
 | Property | Reported as |
 | --- | --- |
-| `POWER_NOW` | `V × I`, positive while discharging, 0 when the supply is absent |
+| `POWER_NOW` | `V × I`; the battery is positive while discharging, `macsmc-ac` is positive while it delivers power. 0 when the supply is absent |
 | `ENERGY_NOW`, `ENERGY_FULL` | charge at `voltage_max_design` instead of the live pack voltage |
 
 That is enough for upower (and anything else reading the power supply class) to
@@ -34,7 +34,9 @@ show a real draw and a real remaining time. Unloading the module puts the
 driver's handlers back; nothing in `macsmc` is replaced, patched or blacklisted.
 
 `macsmc-ac` is wrapped too: unplugged it reports 0 V, and answering 0 W instead
-of `-EOPNOTSUPP` is what stops the journal spam.
+of `-EOPNOTSUPP` is what stops the journal spam. Its `power_now` is not
+negated — before that, a 57 W adapter showed up as **-57 W** in both
+`power_supply` and `macsmc_ac`'s `power1_input`.
 
 ## Requirements
 

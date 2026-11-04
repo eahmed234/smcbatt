@@ -18,6 +18,10 @@
  *
  * Both are computable from values the driver already exposes: P = V * I, and
  * energy from charge at the pack's design voltage instead of the live one.
+ * P is reported with the sign the power_supply class defines: positive while
+ * the supply discharges. That means the battery's P is negated (current_now is
+ * positive while charging), while macsmc-ac reports the power the adapter
+ * delivers, which must stay positive.
  * macsmc-power's property handlers are static, so rather than patch or replace
  * the driver this module swaps in a copy of its power_supply_desc whose
  * get_property() delegates to the original and only answers POWER_NOW and
@@ -37,12 +41,14 @@
 
 struct smcbatt_supply {
 	const char *name;
+	/* Battery: power_now is positive while discharging. */
+	bool discharge_positive;
 	const struct power_supply_desc *orig;
 	struct power_supply_desc desc;
 };
 
 static struct smcbatt_supply smcbatt_supplies[] = {
-	{ .name = "macsmc-battery" },
+	{ .name = "macsmc-battery", .discharge_positive = true },
 	{ .name = "macsmc-ac" },
 };
 
@@ -61,10 +67,13 @@ static struct smcbatt_supply *smcbatt_lookup(struct power_supply *psy)
 }
 
 /*
- * P = V * I. current_now is positive while charging, so flip the sign to make
- * power_now the draw on the pack, as upower expects. A supply that is not
- * present reports 0 V (macsmc-ac when unplugged): answer 0 W rather than
- * -EOPNOTSUPP, which is what makes the core log an error on every read.
+ * P = V * I. current_now is positive while charging, so the battery flips the
+ * sign to make power_now the draw on the pack, as upower expects. macsmc-ac
+ * keeps it: a mains supply's power_now is the power it delivers, and negating
+ * it showed a 57 W adapter as -57 W (also in macsmc_ac's power1_input). A
+ * supply that is not present reports 0 V (macsmc-ac when unplugged): answer
+ * 0 W rather than -EOPNOTSUPP, which is what makes the core log an error on
+ * every read.
  */
 static int smcbatt_power_now(struct smcbatt_supply *s, struct power_supply *psy,
 			     int *out)
@@ -77,7 +86,9 @@ static int smcbatt_power_now(struct smcbatt_supply *s, struct power_supply *psy,
 	if (s->orig->get_property(psy, POWER_SUPPLY_PROP_CURRENT_NOW, &curr) < 0)
 		return -EOPNOTSUPP;
 
-	power = -(s64)volt.intval * curr.intval / SMCBATT_POWER_SCALE;
+	power = (s64)volt.intval * curr.intval / SMCBATT_POWER_SCALE;
+	if (s->discharge_positive)
+		power = -power;
 	if (power > INT_MAX)
 		power = INT_MAX;
 	else if (power < INT_MIN)
