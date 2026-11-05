@@ -31,6 +31,9 @@ affected properties itself, delegating everything else to the original:
 | `ONLINE` (`macsmc-ac`) | derived from the pack current: 0 while the pack discharges |
 | `STATUS` (`macsmc-battery`) | `DISCHARGING`/`CHARGING` from the pack current, `FULL` at 99 %+ |
 
+Both follow a debounced source: a new source has to hold for three consecutive
+polls (~6 s) before `ONLINE`, `STATUS` and the change event move.
+
 That is enough for upower (and anything else reading the power supply class) to
 show a real draw and a real remaining time. Unloading the module puts the
 driver's handlers back; nothing in `macsmc` is replaced, patched or blacklisted.
@@ -49,11 +52,13 @@ discharge and `charge_now` falls. upower's `OnBattery` and TLP's profile
 switching both read those cached values, which is what made the desktop power
 mode switch to Performance on battery after every wake.
 
-`smcbatt` derives `ONLINE` and `STATUS` from `current_now` (100 mA deadband) and
-on `PM_POST_SUSPEND` emits `power_supply_changed` for both supplies, so upower
-and the TLP udev rule re-read immediately even though the driver sends no
-notification of its own. The values are computed on every read, so correctness
-does not depend on that event arriving.
+`smcbatt` derives `ONLINE` and `STATUS` from `current_now` (100 mA deadband,
+debounced over three polls) and on `PM_POST_SUSPEND` emits
+`power_supply_changed` for both supplies, so upower and the TLP udev rule
+re-read immediately even though the driver sends no notification of its own.
+The debounce matters: while charging, the pack current reads a brief discharge
+as the charger ramps or the cells balance, and each such sample used to send
+TLP a change event and flip the desktop profile.
 
 ## Plug-in / unplug auto-switch
 
@@ -65,12 +70,13 @@ That is the separate bug behind a plug-in after wake not switching back to the
 AC profile.
 
 `smcbatt` polls `current_now` every 2 s and emits `power_supply_changed` for
-both supplies whenever the pack-current sign changes — negative while
-discharging, positive while charging or idle — which is the only live indicator
-of the power source the SMC keeps current. On plug-in that fires the udev rule
-and `tlp auto` picks `TLP_PROFILE_AC`; on unplug it picks `TLP_PROFILE_BAT`.
-The event is only emitted on a sign change, so idle polling does not spam
-uevents.
+both supplies when the power source changes — discharging while negative,
+charging or idle while positive — which is the only live indicator of the power
+source the SMC keeps current. A new source must hold for three consecutive
+polls (~6 s) before the debounced `ONLINE`/`STATUS` and the event follow it, so
+a single noisy sample cannot make TLP switch profiles. On a real plug-in the
+event fires the udev rule and `tlp auto` picks `TLP_PROFILE_AC`; on unplug it
+picks `TLP_PROFILE_BAT`. Idle polling emits nothing.
 
 ## Requirements
 

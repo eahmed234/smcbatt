@@ -31,6 +31,8 @@
  * profile (performance) on battery after every wake. Both properties are
  * therefore derived from current_now, which the SMC keeps current, and a
  * PM_POST_SUSPEND notifier emits power_supply_changed so consumers re-read.
+ * Both follow a debounced source: one noisy sample is not a source change, so
+ * a new source must hold for three 2 s polls before it counts.
  *
  * macsmc-power's property handlers are static, so rather than patch or replace
  * the driver this module swaps in a copy of its power_supply_desc whose
@@ -53,6 +55,15 @@
 
 /* µA: below this the pack is neither charging nor discharging. */
 #define SMCBATT_CURRENT_DEADBAND	100000
+
+/*
+ * Consecutive 2 s polls a new power source must show before ONLINE, STATUS and
+ * the change event follow it. The pack reads a brief discharge while the
+ * charger ramps or the cells balance, and TLP turns every change event into a
+ * profile switch, which is the desktop power mode flipping between balanced
+ * and performance on its own while plugged in.
+ */
+#define SMCBATT_DEBOUNCE_POLLS		3
 
 struct smcbatt_supply {
 	const char *name;
@@ -168,10 +179,28 @@ static int smcbatt_battery_current(int *out)
 	return 0;
 }
 
+/*
+ * Debounced power source: 1 = adapter online, 0 = running from the pack, -1 =
+ * not sampled yet. smcbatt_source_update() owns the transitions; readers only
+ * take the value, so a single noisy current sample never reaches upower or the
+ * TLP udev rule as a power-source change.
+ */
+static atomic_t smcbatt_on_ac = ATOMIC_INIT(-1);
+static int smcbatt_debounce_state;
+static int smcbatt_debounce_count;
+static DEFINE_MUTEX(smcbatt_state_lock);
+
 static int smcbatt_online(int *out)
 {
+	int state = atomic_read(&smcbatt_on_ac);
 	int draw;
 
+	if (state >= 0) {
+		*out = state;
+		return 0;
+	}
+
+	/* Not sampled yet: fall back to the raw current. */
 	if (smcbatt_battery_current(&draw) < 0)
 		return -EOPNOTSUPP;
 
@@ -179,15 +208,61 @@ static int smcbatt_online(int *out)
 	return 0;
 }
 
+/*
+ * Read the pack current and move the debounced source state. Returns true when
+ * the source changed (or when @force reseeds it), which is when a change event
+ * is due. @force is used at load and after resume: those readings are real, not
+ * transients, and waiting three polls would leave ONLINE stale for 6 s.
+ */
+static bool smcbatt_source_update(bool force)
+{
+	int draw, raw, state;
+	bool changed = false;
+
+	if (smcbatt_battery_current(&draw) < 0)
+		return false;
+
+	raw = draw < -SMCBATT_CURRENT_DEADBAND ? 0 : 1;
+
+	mutex_lock(&smcbatt_state_lock);
+	state = atomic_read(&smcbatt_on_ac);
+
+	if (force || state < 0) {
+		changed = true;
+		smcbatt_debounce_count = 0;
+	} else if (raw == state) {
+		/* Back in agreement: drop any pending switch. */
+		smcbatt_debounce_count = 0;
+		goto out;
+	} else if (raw == smcbatt_debounce_state) {
+		if (++smcbatt_debounce_count < SMCBATT_DEBOUNCE_POLLS)
+			goto out;
+		changed = true;
+		smcbatt_debounce_count = 0;
+	} else {
+		smcbatt_debounce_state = raw;
+		smcbatt_debounce_count = 1;
+		goto out;
+	}
+
+	atomic_set(&smcbatt_on_ac, raw);
+out:
+	mutex_unlock(&smcbatt_state_lock);
+	return changed;
+}
+
 static int smcbatt_status(struct smcbatt_supply *s, struct power_supply *psy,
 			  int *out)
 {
 	union power_supply_propval curr, cap;
+	int on_ac = atomic_read(&smcbatt_on_ac);
 
 	if (s->orig->get_property(psy, POWER_SUPPLY_PROP_CURRENT_NOW, &curr) < 0)
 		return -EOPNOTSUPP;
 
-	if (curr.intval < -SMCBATT_CURRENT_DEADBAND) {
+	/* Follow the debounced source, not a single current sample. */
+	if (on_ac == 0 ||
+	    (on_ac < 0 && curr.intval < -SMCBATT_CURRENT_DEADBAND)) {
 		*out = POWER_SUPPLY_STATUS_DISCHARGING;
 		return 0;
 	}
@@ -256,9 +331,9 @@ static int smcbatt_get_property(struct power_supply *psy,
 /*
  * The only live indicator of the power source is the pack current, which the
  * SMC keeps current. macsmc-ac's ONLINE flag is stale across plug/unplug, so
- * poll the current every 2 s and emit a change event when its sign flips.  The
- * PM_POST_SUSPEND notifier covers the wake path; the poll covers plug/unplug
- * while the machine is running.
+ * poll the current every 2 s and emit a change event once the debounced source
+ * moves. The PM_POST_SUSPEND notifier covers the wake path; the poll covers
+ * plug/unplug while the machine is running.
  *
  * The poll is a delayed work item, not a timer: reading an SMC key goes through
  * apple_smc_acpi_mmio_wait(), which sleeps. A timer callback runs in softirq
@@ -266,33 +341,31 @@ static int smcbatt_get_property(struct power_supply *psy,
  * preempt count corrupted. Work queued here runs in process context, so the
  * same read is allowed.
  */
-static atomic_t smcbatt_last_sign;
 static struct delayed_work smcbatt_poll;
 
-static void smcbatt_poll_func(struct work_struct *work)
+static void smcbatt_notify_all(void)
 {
 	struct power_supply *psy;
 	int i;
-	int draw;
-	int sign;
 
-	sign = 0;
-	if (smcbatt_battery_current(&draw) == 0) {
-		/* -1 = discharging, +1 = charging/idle. */
-		sign = draw < -SMCBATT_CURRENT_DEADBAND ? -1 : 1;
-	}
-
-	if (sign != atomic_read(&smcbatt_last_sign)) {
-		printk(KERN_INFO "smcbatt: power source sign changed %d -> %d\n",
-			atomic_read(&smcbatt_last_sign), sign);
-		for (i = 0; i < ARRAY_SIZE(smcbatt_supplies); i++) {
-			psy = power_supply_get_by_name(smcbatt_supplies[i].name);
-			if (psy != NULL) {
-				power_supply_changed(psy);
-				power_supply_put(psy);
-			}
+	for (i = 0; i < ARRAY_SIZE(smcbatt_supplies); i++) {
+		psy = power_supply_get_by_name(smcbatt_supplies[i].name);
+		if (psy != NULL) {
+			power_supply_changed(psy);
+			power_supply_put(psy);
 		}
-		atomic_set(&smcbatt_last_sign, sign);
+	}
+}
+
+static void smcbatt_poll_func(struct work_struct *work)
+{
+	int before = atomic_read(&smcbatt_on_ac);
+
+	if (smcbatt_source_update(false)) {
+		printk(KERN_INFO "smcbatt: power source %s -> %s\n",
+		       before == 0 ? "battery" : "AC",
+		       atomic_read(&smcbatt_on_ac) == 0 ? "battery" : "AC");
+		smcbatt_notify_all();
 	}
 
 	schedule_delayed_work(&smcbatt_poll, msecs_to_jiffies(2000));
@@ -300,7 +373,6 @@ static void smcbatt_poll_func(struct work_struct *work)
 
 static void smcbatt_poll_setup(void)
 {
-	atomic_set(&smcbatt_last_sign, 0);
 	INIT_DELAYED_WORK(&smcbatt_poll, smcbatt_poll_func);
 	schedule_delayed_work(&smcbatt_poll, msecs_to_jiffies(2000));
 }
@@ -320,19 +392,12 @@ static void smcbatt_poll_cleanup(void)
 static int smcbatt_pm_notify(struct notifier_block *nb, unsigned long action,
 			     void *data)
 {
-	struct power_supply *psy;
-	int i;
-
 	if (action != PM_POST_SUSPEND)
 		return NOTIFY_DONE;
 
-	for (i = 0; i < ARRAY_SIZE(smcbatt_supplies); i++) {
-		psy = power_supply_get_by_name(smcbatt_supplies[i].name);
-		if (psy == NULL)
-			continue;
-		power_supply_changed(psy);
-		power_supply_put(psy);
-	}
+	/* Whatever the pack shows now is real: a resume is not a transient. */
+	smcbatt_source_update(true);
+	smcbatt_notify_all();
 
 	return NOTIFY_DONE;
 }
@@ -368,6 +433,9 @@ static int __init smcbatt_init(void)
 		pr_err("smcbatt: no macsmc power supplies found; is macsmc-power loaded?\n");
 		return -ENODEV;
 	}
+
+	/* Seed the debounced source so ONLINE is right before the first poll. */
+	smcbatt_source_update(true);
 
 	if (register_pm_notifier(&smcbatt_pm_nb) != 0)
 		printk(KERN_WARNING "smcbatt: no resume notifier; AC state may lag after wake\n");
