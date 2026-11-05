@@ -21,13 +21,15 @@ and `voltage_now ≈ 11.96 V`, i.e. ~17 W and hours of runtime.
 ## What it does
 
 `macsmc-power`'s property handlers are static, so rather than patch or replace
-the driver, `smcbatt` swaps in a copy of its `power_supply_desc` and answers two
-properties itself, delegating everything else to the original:
+the driver, `smcbatt` swaps in a copy of its `power_supply_desc` and answers the
+affected properties itself, delegating everything else to the original:
 
 | Property | Reported as |
 | --- | --- |
 | `POWER_NOW` | `V × I`; the battery is positive while discharging, `macsmc-ac` is positive while it delivers power. 0 when the supply is absent |
 | `ENERGY_NOW`, `ENERGY_FULL` | charge at `voltage_max_design` instead of the live pack voltage |
+| `ONLINE` (`macsmc-ac`) | derived from the pack current: 0 while the pack discharges |
+| `STATUS` (`macsmc-battery`) | `DISCHARGING`/`CHARGING` from the pack current, `FULL` at 99 %+ |
 
 That is enough for upower (and anything else reading the power supply class) to
 show a real draw and a real remaining time. Unloading the module puts the
@@ -37,6 +39,38 @@ driver's handlers back; nothing in `macsmc` is replaced, patched or blacklisted.
 of `-EOPNOTSUPP` is what stops the journal spam. Its `power_now` is not
 negated — before that, a 57 W adapter showed up as **-57 W** in both
 `power_supply` and `macsmc_ac`'s `power1_input`.
+
+### Stale adapter state after resume
+
+`macsmc-power` keeps the pre-sleep adapter state. Unplug the charger during
+suspend and after resume `macsmc-ac` still answers `online=1` and
+`macsmc-battery` still answers `Not charging`, while `current_now` shows a
+discharge and `charge_now` falls. upower's `OnBattery` and TLP's profile
+switching both read those cached values, which is what made the desktop power
+mode switch to Performance on battery after every wake.
+
+`smcbatt` derives `ONLINE` and `STATUS` from `current_now` (100 mA deadband) and
+on `PM_POST_SUSPEND` emits `power_supply_changed` for both supplies, so upower
+and the TLP udev rule re-read immediately even though the driver sends no
+notification of its own. The values are computed on every read, so correctness
+does not depend on that event arriving.
+
+## Plug-in / unplug auto-switch
+
+`macsmc-power` also does not emit a `power_supply` change uevent when
+`macsmc-ac/online` flips on plug-in or unplug while the machine is running, so
+the `85-tlp.rules` udev rule (`ACTION=="change", SUBSYSTEM=="power_supply", ...`
+`RUN+="/usr/bin/tlp auto"`) never fires and TLP auto-switch does not trigger.
+That is the separate bug behind a plug-in after wake not switching back to the
+AC profile.
+
+`smcbatt` polls `current_now` every 2 s and emits `power_supply_changed` for
+both supplies whenever the pack-current sign changes — negative while
+discharging, positive while charging or idle — which is the only live indicator
+of the power source the SMC keeps current. On plug-in that fires the udev rule
+and `tlp auto` picks `TLP_PROFILE_AC`; on unplug it picks `TLP_PROFILE_BAT`.
+The event is only emitted on a sign change, so idle polling does not spam
+uevents.
 
 ## Requirements
 
@@ -78,6 +112,8 @@ reboot.
 lsmod | grep smcbatt
 upower -i /org/freedesktop/UPower/devices/battery_macsmc_battery | \
   grep -E 'energy|rate|time|percentage'
+cat /sys/class/power_supply/macsmc-ac/online        # 0 while unplugged
+cat /sys/class/power_supply/macsmc-battery/status   # Discharging while unplugged
 journalctl -b -k | grep -c 'power_now'      # 0 after the module loads
 ```
 
