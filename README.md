@@ -60,6 +60,15 @@ The debounce matters: while charging, the pack current reads a brief discharge
 as the charger ramps or the cells balance, and each such sample used to send
 TLP a change event and flip the desktop profile.
 
+### Polling across system suspend
+
+The 2 s poll is cancelled on `PM_SUSPEND_PREPARE` and restarted on
+`PM_POST_SUSPEND`, which the kernel also sends when a suspend attempt fails, so
+polling never stops for good. Nothing in the module then issues an SMC
+transaction while the ACPI EC is being suspended: a reader caught in
+`apple_smc_acpi_mmio_wait()` at that moment can hold up the suspend path, and
+the machine stays awake (panel on, tens of watts) instead of entering S3.
+
 ## Plug-in / unplug auto-switch
 
 `macsmc-power` also does not emit a `power_supply` change uevent when

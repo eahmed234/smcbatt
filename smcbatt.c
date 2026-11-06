@@ -388,16 +388,31 @@ static void smcbatt_poll_cleanup(void)
  * values above are computed on demand, but upower and TLP's udev rule act on
  * the change event, so send one after resume, and also when the pack current
  * sign changes on plug/unplug.
+ *
+ * The poll is stopped for the duration of the sleep. An SMC transaction that is
+ * in flight while the ACPI EC is being suspended can hold up the suspend path,
+ * and the machine then sits awake with the panel on instead of entering S3.
+ * PM_POST_SUSPEND also arrives when a suspend attempt fails, so the poll is
+ * restarted either way.
  */
 static int smcbatt_pm_notify(struct notifier_block *nb, unsigned long action,
 			     void *data)
 {
-	if (action != PM_POST_SUSPEND)
-		return NOTIFY_DONE;
+	switch (action) {
+	case PM_SUSPEND_PREPARE:
+		cancel_delayed_work_sync(&smcbatt_poll);
+		break;
 
-	/* Whatever the pack shows now is real: a resume is not a transient. */
-	smcbatt_source_update(true);
-	smcbatt_notify_all();
+	case PM_POST_SUSPEND:
+		/* Whatever the pack shows now is real: a resume is not a transient. */
+		smcbatt_source_update(true);
+		smcbatt_notify_all();
+		schedule_delayed_work(&smcbatt_poll, msecs_to_jiffies(2000));
+		break;
+
+	default:
+		break;
+	}
 
 	return NOTIFY_DONE;
 }
@@ -437,10 +452,11 @@ static int __init smcbatt_init(void)
 	/* Seed the debounced source so ONLINE is right before the first poll. */
 	smcbatt_source_update(true);
 
-	if (register_pm_notifier(&smcbatt_pm_nb) != 0)
-		printk(KERN_WARNING "smcbatt: no resume notifier; AC state may lag after wake\n");
-
+	/* Arm the poll before the notifier, which cancels it on suspend. */
 	smcbatt_poll_setup();
+
+	if (register_pm_notifier(&smcbatt_pm_nb) != 0)
+		printk(KERN_WARNING "smcbatt: no suspend notifier; AC state may lag after wake\n");
 
 	return 0;
 }
@@ -451,9 +467,10 @@ static void __exit smcbatt_exit(void)
 	struct power_supply *psy;
 	int i;
 
+	/* Unregister first: PM_POST_SUSPEND would reschedule the poll. */
+	unregister_pm_notifier(&smcbatt_pm_nb);
 	/* Finish any running poll before the descs it reads through go away. */
 	smcbatt_poll_cleanup();
-	unregister_pm_notifier(&smcbatt_pm_nb);
 
 	for (i = 0; i < ARRAY_SIZE(smcbatt_supplies); i++) {
 		s = &smcbatt_supplies[i];
